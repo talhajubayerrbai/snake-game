@@ -67,7 +67,7 @@ jobs:
         working-directory: terraform
         run: |
           terraform plan -input=false -out=tfplan \
-            -var="ec2_public_key=${{ secrets.EC2_PUBLIC_KEY }}"
+            -var="ec2_public_key=${{ vars.EC2_PUBLIC_KEY }}"
       - name: Terraform Apply
         working-directory: terraform
         run: terraform apply -input=false -auto-approve tfplan
