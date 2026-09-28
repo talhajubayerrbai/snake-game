@@ -118,9 +118,40 @@ jobs:
             AWS_REGION="$AWS_REGION" ARTIFACT_BUCKET="$ARTIFACT_BUCKET" ZIP="$ZIP" \
             bash -s <<'ENDSSH'
           set -euo pipefail
+
+          # Install Node.js and unzip if not already present (in case user-data hasn't finished)
+          command -v node >/dev/null 2>&1 || sudo dnf install -y nodejs
+          command -v unzip >/dev/null 2>&1 || sudo dnf install -y unzip
+          command -v aws >/dev/null 2>&1 || sudo dnf install -y aws-cli
+
+          # Download and extract artifact
           aws s3 cp "s3://$ARTIFACT_BUCKET/$ZIP" /tmp/artifact.zip --region "$AWS_REGION"
+          sudo mkdir -p /opt/snake-game
           sudo rm -rf /opt/snake-game/*
           sudo unzip -o /tmp/artifact.zip -d /opt/snake-game
+
+          # Write systemd unit (idempotent — works even if user-data hasn't run yet)
+          sudo tee /etc/systemd/system/snake-game.service > /dev/null <<'UNIT'
+          [Unit]
+          Description=Snake Game Node.js Server
+          After=network.target
+
+          [Service]
+          Type=simple
+          WorkingDirectory=/opt/snake-game
+          ExecStart=/usr/bin/node server.js
+          Restart=on-failure
+          RestartSec=5
+          Environment=PORT=80
+          StandardOutput=journal
+          StandardError=journal
+
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
+
+          sudo systemctl daemon-reload
+          sudo systemctl enable snake-game
           sudo systemctl restart snake-game
           sudo systemctl status snake-game --no-pager
           ENDSSH
