@@ -19,28 +19,43 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  AWS_REGION: ${{ vars.AWS_REGION }}
+
 jobs:
-  deploy:
-    name: Terraform Apply
+  test:
+    name: Test
     runs-on: ubuntu-latest
-    env:
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      AWS_REGION: ${{ vars.AWS_REGION }}
-      TF_VAR_aws_region: ${{ vars.AWS_REGION }}
-      TF_VAR_service_name: ${{ vars.SERVICE_NAME }}
-      TF_VAR_github_repo: ${{ github.repository }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.revision || github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Unit tests
+        run: node server.test.js
+      - name: Lint
+        run: npx --yes eslint server.js
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+  provision:
+    name: Provision
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      public_ip: ${{ steps.tf.outputs.public_ip }}
+      instance_id: ${{ steps.tf.outputs.instance_id }}
+      artifact_bucket: ${{ steps.tf.outputs.artifact_bucket }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.revision || github.sha }}
+      - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.10.0"
-
+          terraform_wrapper: false
       - name: Terraform Init
         working-directory: terraform
         run: |
@@ -48,31 +63,100 @@ jobs:
             -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
             -backend-config="key=${{ vars.TF_STATE_KEY }}" \
             -backend-config="region=${{ vars.AWS_REGION }}"
-
       - name: Terraform Plan
         working-directory: terraform
-        run: terraform plan -input=false -out=tfplan
-
+        run: |
+          terraform plan -input=false -out=tfplan \
+            -var="ec2_public_key=${{ secrets.EC2_PUBLIC_KEY }}"
       - name: Terraform Apply
         working-directory: terraform
         run: terraform apply -input=false -auto-approve tfplan
-
-      - name: Get ALB DNS and Verify
+      - name: Read outputs
+        id: tf
         working-directory: terraform
         run: |
-          ALB_DNS=$(terraform output -raw alb_dns_name)
-          echo "ALB DNS: $ALB_DNS"
-          URL="http://$ALB_DNS/"
-          echo "Waiting for $URL to return HTTP 200..."
+          echo "public_ip=$(terraform output -raw public_ip)" >> "$GITHUB_OUTPUT"
+          echo "instance_id=$(terraform output -raw instance_id)" >> "$GITHUB_OUTPUT"
+          echo "artifact_bucket=$(terraform output -raw artifact_bucket)" >> "$GITHUB_OUTPUT"
+
+  configure:
+    name: Configure
+    needs: provision
+    runs-on: ubuntu-latest
+    env:
+      PUBLIC_IP: ${{ needs.provision.outputs.public_ip }}
+      ARTIFACT_BUCKET: ${{ needs.provision.outputs.artifact_bucket }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.revision || github.sha }}
+      - name: Package artifact
+        run: |
+          SHA="${{ inputs.revision || github.sha }}"
+          ZIP="snake-game-${SHA}.zip"
+          zip -r "$ZIP" server.js index.html package.json scripts/
+          echo "ZIP=$ZIP" >> "$GITHUB_ENV"
+          echo "SHA=$SHA" >> "$GITHUB_ENV"
+      - name: Upload artifact to S3
+        run: aws s3 cp "$ZIP" "s3://$ARTIFACT_BUCKET/$ZIP" --region "$AWS_REGION"
+      - name: Write SSH key
+        run: |
+          printf '%s\n' "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > /tmp/deploy.pem
+          chmod 600 /tmp/deploy.pem
+      - name: Wait for SSH
+        run: |
           for i in $(seq 1 30); do
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$URL" || echo "000")
-            echo "Attempt $i: HTTP $STATUS"
-            if [ "$STATUS" = "200" ]; then
-              echo "Health check passed!"
-              echo "Live URL: http://$ALB_DNS"
-              exit 0
+            if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+                   -i /tmp/deploy.pem ec2-user@"$PUBLIC_IP" true 2>/dev/null; then
+              echo "SSH ready"; break
             fi
+            echo "Waiting for SSH ($i/30)..."; sleep 10
+          done
+      - name: Deploy artifact
+        run: |
+          ssh -o StrictHostKeyChecking=no -i /tmp/deploy.pem ec2-user@"$PUBLIC_IP" \
+            AWS_REGION="$AWS_REGION" ARTIFACT_BUCKET="$ARTIFACT_BUCKET" ZIP="$ZIP" \
+            bash -s <<'ENDSSH'
+          set -euo pipefail
+          aws s3 cp "s3://$ARTIFACT_BUCKET/$ZIP" /tmp/artifact.zip --region "$AWS_REGION"
+          sudo rm -rf /opt/snake-game/*
+          sudo unzip -o /tmp/artifact.zip -d /opt/snake-game
+          sudo systemctl restart snake-game
+          sudo systemctl status snake-game --no-pager
+          ENDSSH
+      - name: Cleanup key
+        if: always()
+        run: rm -f /tmp/deploy.pem
+
+  verify:
+    name: Verify
+    needs: [provision, configure]
+    runs-on: ubuntu-latest
+    env:
+      PUBLIC_IP: ${{ needs.provision.outputs.public_ip }}
+    steps:
+      - name: Wait for app
+        run: |
+          STATUS=000
+          for i in $(seq 1 30); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "http://$PUBLIC_IP/" || echo "000")
+            echo "Attempt $i: HTTP $STATUS"
+            [ "$STATUS" = "200" ] && break
             sleep 10
           done
-          echo "Health check timed out after 5 minutes"
-          exit 1
+          [ "$STATUS" = "200" ] || { echo "ERROR: / did not return 200"; exit 1; }
+      - name: Assert /health returns 200
+        run: |
+          S=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "http://$PUBLIC_IP/health")
+          echo "/health -> $S"
+          [ "$S" = "200" ] || { echo "FAIL: expected 200"; exit 1; }
+          echo "PASS /health -> 200"
+      - name: Assert /nonsense returns 404
+        run: |
+          S=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "http://$PUBLIC_IP/nonsense")
+          echo "/nonsense -> $S"
+          [ "$S" = "404" ] || { echo "FAIL: expected 404"; exit 1; }
+          echo "PASS /nonsense -> 404"
+      - name: Report live URL
+        run: |
+          printf 'Live URL: http://%s\n' "$PUBLIC_IP"
