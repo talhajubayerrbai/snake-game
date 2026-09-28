@@ -7,7 +7,7 @@ terraform {
     }
   }
   backend "s3" {
-    # bucket, key, region and use_lockfile are supplied via -backend-config at init time
+    # bucket, key, region supplied via -backend-config at init time
     use_lockfile = true
   }
 }

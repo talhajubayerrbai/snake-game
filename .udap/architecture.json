@@ -1,0 +1,64 @@
+{
+  "edges": [
+    {
+      "from": "tgt_01a0e6d273401d6225444ddf36b63e98",
+      "id": "tgt_01a0e6d273401d6225444ddf36b63e98-artifact_bucket-0",
+      "kind": "uses",
+      "props": {},
+      "to": "artifact_bucket"
+    }
+  ],
+  "groups": [
+    {
+      "id": "env_01a0e6cf182d9be0153cb21fe80cc254",
+      "kind": "environment",
+      "name": "dev",
+      "purpose": "dev",
+      "ref": {
+        "id": "env_01a0e6cf182d9be0153cb21fe80cc254",
+        "kind": "environment"
+      }
+    }
+  ],
+  "nodes": [
+    {
+      "group": "env_01a0e6cf182d9be0153cb21fe80cc254",
+      "id": "tgt_01a0e6d273401d6225444ddf36b63e98",
+      "name": "snake-game",
+      "props": {
+        "instance_type": "t3.micro"
+      },
+      "ref": {
+        "id": "tgt_01a0e6d273401d6225444ddf36b63e98",
+        "kind": "target"
+      },
+      "runtime_known": true,
+      "service_id": "svc_01a0e6cdfe8036e04d3a83dd3f79999d",
+      "type": "service.ec2",
+      "words": {
+        "detail": "t3.micro",
+        "family": "Service on EC2",
+        "glyph": "EC2",
+        "lane": "compute",
+        "name": "snake-game"
+      }
+    },
+    {
+      "group": "env_01a0e6cf182d9be0153cb21fe80cc254",
+      "id": "artifact_bucket",
+      "name": "snake-game artifact bucket",
+      "props": {
+        "name": "snake-game-artifacts-241533126054",
+        "public": false,
+        "region": "us-east-1",
+        "versioning": true
+      },
+      "type": "resource.bucket"
+    }
+  ],
+  "scope": {
+    "id": "svc_01a0e6cdfe8036e04d3a83dd3f79999d",
+    "kind": "service"
+  },
+  "version": 1
+}

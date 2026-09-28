@@ -4,7 +4,9 @@
   "description": "Browser-playable Snake game served by a lightweight Node.js HTTP server",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node server.test.js",
+    "lint": "npx --yes eslint server.js"
   },
   "engines": {
     "node": ">=20"
