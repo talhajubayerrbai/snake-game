@@ -1,0 +1,78 @@
+name: Deploy Snake Game
+
+on:
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: 'Git revision to deploy'
+        required: false
+        default: ''
+      udap_run_id:
+        description: 'UDAP run ID'
+        required: false
+        default: ''
+
+concurrency:
+  group: deploy-${{ vars.TF_STATE_KEY }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Terraform Apply
+    runs-on: ubuntu-latest
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      TF_VAR_aws_region: ${{ vars.AWS_REGION }}
+      TF_VAR_service_name: ${{ vars.SERVICE_NAME }}
+      TF_VAR_github_repo: ${{ github.repository }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.revision || github.sha }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.10.0"
+
+      - name: Terraform Init
+        working-directory: terraform
+        run: |
+          terraform init -input=false -reconfigure \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=${{ vars.TF_STATE_KEY }}" \
+            -backend-config="region=${{ vars.AWS_REGION }}"
+
+      - name: Terraform Plan
+        working-directory: terraform
+        run: terraform plan -input=false -out=tfplan
+
+      - name: Terraform Apply
+        working-directory: terraform
+        run: terraform apply -input=false -auto-approve tfplan
+
+      - name: Get ALB DNS and Verify
+        working-directory: terraform
+        run: |
+          ALB_DNS=$(terraform output -raw alb_dns_name)
+          echo "ALB DNS: $ALB_DNS"
+          URL="http://$ALB_DNS/"
+          echo "Waiting for $URL to return HTTP 200..."
+          for i in $(seq 1 30); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$URL" || echo "000")
+            echo "Attempt $i: HTTP $STATUS"
+            if [ "$STATUS" = "200" ]; then
+              echo "Health check passed!"
+              echo "Live URL: http://$ALB_DNS"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Health check timed out after 5 minutes"
+          exit 1
